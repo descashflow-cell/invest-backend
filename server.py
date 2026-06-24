@@ -146,17 +146,15 @@ async def put_salary(month: str, payload: SalaryIn, user=Depends(get_current_use
         upsert=True)
     return {"month": month, "amount": payload.amount}
 
-@api_router.get("/fixed-expenses/{month}", response_model=List[FixedExpense])
-async def list_fixed(month: str, user=Depends(get_current_user)):
-    _validate_month(month)
-    docs = await db.fixed_expenses.find({"month": month, "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
+@api_router.get("/fixed-expenses", response_model=List[FixedExpense])
+async def list_fixed(user=Depends(get_current_user)):
+    docs = await db.fixed_expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
     return docs
 
-@api_router.post("/fixed-expenses/{month}", response_model=FixedExpense)
-async def add_fixed(month: str, payload: FixedExpenseIn, user=Depends(get_current_user)):
-    _validate_month(month)
+@api_router.post("/fixed-expenses", response_model=FixedExpense)
+async def add_fixed(payload: FixedExpenseIn, user=Depends(get_current_user)):
     item = {"id": str(uuid.uuid4()), "name": payload.name.strip(), "amount": payload.amount,
-            "created_at": datetime.now(timezone.utc).isoformat(), "user_id": user["id"], "month": month}
+            "created_at": datetime.now(timezone.utc).isoformat(), "user_id": user["id"]}
     await db.fixed_expenses.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
     return item
@@ -227,7 +225,7 @@ async def summary(month: str, user=Depends(get_current_user)):
     uid = user["id"]
     sd = await db.salaries.find_one({"month": month, "user_id": uid}, {"_id": 0})
     salary = float(sd["amount"]) if sd else 0.0
-    fixed = await db.fixed_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
+    fixed = await db.fixed_expenses.find({"user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
     fixed_total = sum(x["amount"] for x in fixed)
     extra = await db.extra_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
     extra_total = sum(x["amount"] for x in extra)
@@ -248,10 +246,8 @@ async def ytd(year: int, user=Depends(get_current_user)):
     uid = user["id"]
     months = [f"{year}-{m:02d}" for m in range(1, 13)]
     salaries = {d["month"]: float(d["amount"]) async for d in db.salaries.find({"month": {"$in": months}, "user_id": uid}, {"_id": 0})}
-    # fixed_docs = await db.fixed_expenses.find({"user_id": uid}, {"_id": 0}).to_list(1000)
-    fixed_docs = {f["_id"]: f["total_amount"] async for f in db.fixed_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total_amount": {"$sum": "$amount"}}}])}
-    print(f"fixed_docs: {fixed_docs}")
-    #fixed_total = sum(float(d["amount"]) for d in fixed_docs)
+    fixed_docs = await db.fixed_expenses.find({"user_id": uid}, {"_id": 0}).to_list(1000)
+    fixed_total = sum(float(d["amount"]) for d in fixed_docs)
     extra_map = {}
     async for d in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
         extra_map[d["_id"]] = float(d["total"])
@@ -261,7 +257,7 @@ async def ytd(year: int, user=Depends(get_current_user)):
     series = []; ti=tf=te=tin=ts=0.0; am=0; best=None; worst=None
     for m in months:
         s = salaries.get(m, 0.0); e = extra_map.get(m, 0.0); i_ = inv_map.get(m, 0.0)
-        f = fixed_docs.get(m, 0.0) if s > 0 else 0.0
+        f = fixed_total if s > 0 else 0.0
         bal = s - f - e; saved = bal - i_; act = s>0 or e>0 or i_>0
         if act: am += 1
         series.append({"month": m, "income": s, "fixed": f, "extra": e, "expenses": f+e, "invested": i_, "balance": bal, "saved": saved, "active": act})
