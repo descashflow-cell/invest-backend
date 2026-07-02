@@ -46,17 +46,17 @@ def create_token(user_id: str, email: str) -> str:
 async def get_current_user(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Non autenticato")
+        raise HTTPException(status_code=401, detail="Not authenticated")
     token = auth[7:]
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token scaduto")
+        raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token non valido")
+        raise HTTPException(status_code=401, detail="Invalid token")
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
     if not user:
-        raise HTTPException(status_code=401, detail="Utente non trovato")
+        raise HTTPException(status_code=401, detail="User not found")
     return user
 
 # ----- Models -----
@@ -98,17 +98,17 @@ class ExtraExpense(BaseModel):
     id: str; name: str; amount: float; category: str; month: str; created_at: str
 
 class InvestmentIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80); amount: float = Field(gt=0); month: str
+    name: str = Field(min_length=1, max_length=80); amount: float = Field(gt=0); month: str; type: str = Field(min_length=1, max_length=20)
 
 class Investment(BaseModel):
-    id: str; name: str; amount: float; month: str; created_at: str
+    id: str; name: str; amount: float; month: str; type: str; created_at: str
 
 # ----- Auth routes -----
 @api_router.post("/auth/register", response_model=AuthOut)
 async def register(payload: RegisterIn):
     email = payload.email.lower().strip()
     if await db.users.find_one({"email": email}):
-        raise HTTPException(status_code=400, detail="Email già registrata")
+        raise HTTPException(status_code=400, detail="Email already registered")
     uid = str(uuid.uuid4())
     user = {"id": uid, "email": email, "name": (payload.name or "").strip() or None,
             "password_hash": hash_pwd(payload.password),
@@ -122,7 +122,7 @@ async def login(payload: LoginIn):
     email = payload.email.lower().strip()
     user = await db.users.find_one({"email": email})
     if not user or not verify_pwd(payload.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Email o password errati")
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
     return {"token": create_token(user["id"], email),
             "user": {"id": user["id"], "email": email, "name": user.get("name")}}
 
@@ -162,7 +162,7 @@ async def add_fixed(payload: FixedExpenseIn, user=Depends(get_current_user)):
 @api_router.delete("/fixed-expenses/{iid}")
 async def del_fixed(iid: str, user=Depends(get_current_user)):
     r = await db.fixed_expenses.delete_one({"id": iid, "user_id": user["id"]})
-    if r.deleted_count == 0: raise HTTPException(404, "Non trovato")
+    if r.deleted_count == 0: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api_router.get("/extra-expenses", response_model=List[ExtraExpense])
@@ -184,7 +184,7 @@ async def add_extra(payload: ExtraExpenseIn, user=Depends(get_current_user)):
 @api_router.delete("/extra-expenses/{iid}")
 async def del_extra(iid: str, user=Depends(get_current_user)):
     r = await db.extra_expenses.delete_one({"id": iid, "user_id": user["id"]})
-    if r.deleted_count == 0: raise HTTPException(404, "Non trovato")
+    if r.deleted_count == 0: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api_router.get("/investments", response_model=List[Investment])
@@ -197,7 +197,7 @@ async def list_inv(month: str, user=Depends(get_current_user)):
 async def add_inv(payload: InvestmentIn, user=Depends(get_current_user)):
     _validate_month(payload.month)
     item = {"id": str(uuid.uuid4()), "name": payload.name.strip(), "amount": payload.amount,
-            "month": payload.month, "created_at": datetime.now(timezone.utc).isoformat(),
+            "month": payload.month, "type": payload.type.strip(), "created_at": datetime.now(timezone.utc).isoformat(),
             "user_id": user["id"]}
     await db.investments.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
@@ -217,7 +217,8 @@ async def portfolio(user=Depends(get_current_user)):
         {"$group": {"_id": "$name", "total": {"$sum": "$amount"}}},
         {"$sort": {"total": -1}}]):
         items.append({"name": d["_id"], "total": float(d["total"])}); total += float(d["total"])
-    return {"total": total, "items": items}
+    starting_inv = await db.investments.find({"type": "initial", "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
+    return {"total": total, "items": items, "starting_investments": starting_inv}
 
 @api_router.get("/summary/{month}")
 async def summary(month: str, user=Depends(get_current_user)):
@@ -232,8 +233,8 @@ async def summary(month: str, user=Depends(get_current_user)):
     cat = {}
     for e in extra: cat[e["category"]] = cat.get(e["category"], 0.0) + e["amount"]
     by_category = [{"category": k, "total": v} for k, v in sorted(cat.items(), key=lambda kv: -kv[1])]
-    inv = await db.investments.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
-    inv_total = sum(x["amount"] for x in inv)
+    inv = await db.investments.find({"month": month, "user_id": uid, "type": {"$ne": "initial"}}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
+    inv_total = sum(x["amount"] for x in inv if x.get("type") != "extra")
     balance = salary - fixed_total - extra_total
     return {"month": month, "salary": salary, "fixed_total": fixed_total, "extra_total": extra_total,
             "balance": balance, "fixed_expenses": fixed, "extra_expenses": extra, "by_category": by_category,
@@ -252,7 +253,7 @@ async def ytd(year: int, user=Depends(get_current_user)):
     async for d in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
         extra_map[d["_id"]] = float(d["total"])
     inv_map = {}
-    async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
+    async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
         inv_map[d["_id"]] = float(d["total"])
     series = []; ti=tf=te=tin=ts=0.0; am=0; best=None; worst=None
     for m in months:
