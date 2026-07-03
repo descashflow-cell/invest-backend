@@ -78,11 +78,11 @@ class AuthOut(BaseModel):
     token: str
     user: UserOut
 
-class SalaryIn(BaseModel):
-    amount: float = Field(ge=0)
+class IncomesIn(BaseModel):
+    amount: float = Field(ge=0); type: str = Field(min_length=1, max_length=20)
 
-class SalaryOut(BaseModel):
-    month: str; amount: float
+class IncomesOut(BaseModel):
+    month: str; amount: float; type: str
 
 class FixedExpenseIn(BaseModel):
     name: str = Field(min_length=1, max_length=120); amount: float = Field(ge=0)
@@ -131,20 +131,32 @@ async def me(user: dict = Depends(get_current_user)):
     return {"id": user["id"], "email": user["email"], "name": user.get("name")}
 
 # ----- Data routes (all protected, scoped by user_id) -----
-@api_router.get("/salary/{month}", response_model=SalaryOut)
-async def get_salary(month: str, user=Depends(get_current_user)):
+@api_router.get("/incomes/{month}", response_model=List[IncomesOut])
+async def get_incomes(month: str, user=Depends(get_current_user)):
     _validate_month(month)
-    d = await db.salaries.find_one({"month": month, "user_id": user["id"]}, {"_id": 0})
-    return {"month": month, "amount": float(d["amount"]) if d else 0.0}
+    docs = await db.incomes.find({"month": month, "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
+    return docs
 
-@api_router.put("/salary/{month}", response_model=SalaryOut)
-async def put_salary(month: str, payload: SalaryIn, user=Depends(get_current_user)):
+@api_router.post("/incomes/{month}", response_model=IncomesOut)
+async def post_incomes(month: str, payload: IncomesIn, user=Depends(get_current_user)):
     _validate_month(month)
-    await db.salaries.update_one(
-        {"month": month, "user_id": user["id"]},
-        {"$set": {"month": month, "amount": payload.amount, "user_id": user["id"]}},
-        upsert=True)
-    return {"month": month, "amount": payload.amount}
+    item = {"id": str(uuid.uuid4()), "type": payload.type.strip(), "amount": payload.amount, "user_id": user["id"], "month": month}
+    print(f"Adding income: {item}")
+    await db.incomes.insert_one(item)
+    return {"month": month, "amount": payload.amount, "type": payload.type}
+
+@api_router.put("/incomes/{iid}")
+async def put_incomes(iid: str, payload: IncomesIn, user=Depends(get_current_user)):
+    await db.incomes.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"amount": payload.amount, "type": payload.type}})
+    return {"ok": True}
+
+@api_router.delete("/incomes/{iid}")
+async def delete_incomes(iid: str, user=Depends(get_current_user)):
+    r = await db.incomes.delete_one({"id": iid, "user_id": user["id"]})
+    if r.deleted_count == 0: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 @api_router.get("/fixed-expenses/{month}", response_model=List[FixedExpense])
 async def list_fixed(month: str, user=Depends(get_current_user)):
@@ -211,6 +223,18 @@ async def del_inv(iid: str, user=Depends(get_current_user)):
     if r.deleted_count == 0: raise HTTPException(404, "Non trovato")
     return {"ok": True}
 
+@api_router.get("/portfolio/{month}")
+async def portfolio(month: str, user=Depends(get_current_user)):
+    _validate_month(month)
+    items = []; total = 0.0
+    async for d in db.investments.aggregate([
+        {"$match": {"month": month, "user_id": user["id"], "type": {"$ne": "initial"}}},
+        {"$group": {"_id": "$name", "total": {"$sum": "$amount"}}},
+        {"$sort": {"total": -1}}]):
+        items.append({"name": d["_id"], "total": float(d["total"])}); total += float(d["total"])
+    # starting_inv = await db.investments.find({"type": "initial", "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
+    return {"total": total, "items": items}
+
 @api_router.get("/portfolio")
 async def portfolio(user=Depends(get_current_user)):
     items = []; total = 0.0
@@ -219,15 +243,20 @@ async def portfolio(user=Depends(get_current_user)):
         {"$group": {"_id": "$name", "total": {"$sum": "$amount"}}},
         {"$sort": {"total": -1}}]):
         items.append({"name": d["_id"], "total": float(d["total"])}); total += float(d["total"])
+    return {"total": total, "items": items}
+
+@api_router.get("/investments-list")
+async def investments_list(user=Depends(get_current_user)):
+    investments = await db.investments.find({"type": {"$ne": "initial"}, "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
     starting_inv = await db.investments.find({"type": "initial", "user_id": user["id"]}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
-    return {"total": total, "items": items, "starting_investments": starting_inv}
+    return {"investments": investments, "starting_investments": starting_inv}
 
 @api_router.get("/summary/{month}")
 async def summary(month: str, user=Depends(get_current_user)):
     _validate_month(month)
     uid = user["id"]
-    sd = await db.salaries.find_one({"month": month, "user_id": uid}, {"_id": 0})
-    salary = float(sd["amount"]) if sd else 0.0
+    incomes = await db.incomes.find({"month": month, "user_id": uid}, {"_id": 0}).to_list(1000)
+    salary = sum(float(sd["amount"]) for sd in incomes)
     fixed = await db.fixed_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
     fixed_total = sum(x["amount"] for x in fixed)
     extra = await db.extra_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
@@ -237,8 +266,8 @@ async def summary(month: str, user=Depends(get_current_user)):
     by_category = [{"category": k, "total": v} for k, v in sorted(cat.items(), key=lambda kv: -kv[1])]
     inv = await db.investments.find({"month": month, "user_id": uid, "type": {"$ne": "initial"}}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
     inv_total = sum(x["amount"] for x in inv if x.get("type") != "extra")
-    balance = salary - fixed_total - extra_total
-    return {"month": month, "salary": salary, "fixed_total": fixed_total, "extra_total": extra_total,
+    balance = salary - fixed_total - extra_total - inv_total
+    return {"month": month, "incomes": incomes, "fixed_total": fixed_total, "extra_total": extra_total,
             "balance": balance, "fixed_expenses": fixed, "extra_expenses": extra, "by_category": by_category,
             "investments_month": inv, "investments_month_total": inv_total,
             "suggested_investable": max(0.0, balance * 0.5)}
