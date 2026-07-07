@@ -194,6 +194,13 @@ async def del_fixed(iid: str, user=Depends(get_current_user)):
     if r.deleted_count == 0: raise HTTPException(404, "Not found")
     return {"ok": True}
 
+@api_router.put("/fixed-expenses/{iid}")
+async def put_fixed(iid: str, payload: FixedExpenseIn, user=Depends(get_current_user)):
+    await db.fixed_expenses.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"amount": payload.amount, "name": payload.name}})
+    return {"ok": True}
+
 @api_router.post("/fixed-expenses/copy/{month}")
 async def copy_fixed(month: str, user=Depends(get_current_user)):
     _validate_month(month)
