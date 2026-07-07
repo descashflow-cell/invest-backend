@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os, re, uuid, logging
@@ -58,6 +58,21 @@ async def get_current_user(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+def get_previous_month(month: str) -> str:
+    date = datetime.strptime(month, "%Y-%m")
+
+    if date.month == 1:
+        previous = date.replace(
+            year=date.year - 1,
+            month=12,
+        )
+    else:
+        previous = date.replace(
+            month=date.month - 1,
+        )
+
+    return previous.strftime("%Y-%m")
 
 # ----- Models -----
 class RegisterIn(BaseModel):
@@ -177,6 +192,36 @@ async def add_fixed(month: str, payload: FixedExpenseIn, user=Depends(get_curren
 async def del_fixed(iid: str, user=Depends(get_current_user)):
     r = await db.fixed_expenses.delete_one({"id": iid, "user_id": user["id"]})
     if r.deleted_count == 0: raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+@api_router.post("/fixed-expenses/copy/{month}")
+async def copy_fixed(month: str, user=Depends(get_current_user)):
+    _validate_month(month)
+    previous_month = get_previous_month(month)
+    existing = await db.fixed_expenses.count_documents({
+        "user_id": user["id"],
+        "month": month,
+    })
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="FIXED_EXPENSES_ALREADY_EXIST",
+        )
+    previous_expenses = await db.fixed_expenses.find({"month": previous_month, "user_id": user["id"]}, {"_id": 0}).to_list(length=None)
+    if not previous_expenses:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="NO_FIXED_EXPENSES_TO_COPY",
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    new_expenses = []
+    for expense in previous_expenses:
+        expense["id"] = str(uuid.uuid4())
+        expense["created_at"] = now
+        expense["month"] = month
+        new_expenses.append(expense)
+
+    await db.fixed_expenses.insert_many(new_expenses)
     return {"ok": True}
 
 @api_router.get("/extra-expenses", response_model=List[ExtraExpense])
