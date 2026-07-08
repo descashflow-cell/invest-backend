@@ -347,6 +347,14 @@ async def summary(month: str, user=Depends(get_current_user)):
             "investments_month": inv, "investments_month_total": inv_total,
             "suggested_investable": max(0.0, balance * 0.5)}
 
+@api_router.get("/available-categories")
+async def available_categories(user=Depends(get_current_user)):
+    uid = user["id"]
+    extra_categories = await db.extra_expenses.distinct("category", {"user_id": uid})
+    fixed_names = await db.fixed_expenses.distinct("name", {"user_id": uid})
+    investments_names = await db.investments.distinct("name", {"user_id": uid})
+    return {"extra_categories": extra_categories, "fixed_names": fixed_names, "investments_names": investments_names}
+
 @api_router.get("/ytd/{year}")
 async def ytd(year: int, user=Depends(get_current_user)):
     if year < 2000 or year > 2100: raise HTTPException(400, "Anno non valido")
