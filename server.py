@@ -253,6 +253,13 @@ async def add_extra(payload: ExtraExpenseIn, user=Depends(get_current_user)):
     item.pop("user_id"); item.pop("_id", None)
     return item
 
+@api_router.put("/extra-expenses/{iid}")
+async def put_extra(iid: str, payload: ExtraExpenseIn, user=Depends(get_current_user)):
+    await db.extra_expenses.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"amount": payload.amount, "name": payload.name, "category": payload.category.strip()}})
+    return {"ok": True}
+
 @api_router.delete("/extra-expenses/{iid}")
 async def del_extra(iid: str, user=Depends(get_current_user)):
     r = await db.extra_expenses.delete_one({"id": iid, "user_id": user["id"]})
@@ -274,6 +281,16 @@ async def add_inv(payload: InvestmentIn, user=Depends(get_current_user)):
     await db.investments.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
     return item
+
+@api_router.put("/investments/{iid}")
+async def update_inv(iid: str, payload: InvestmentIn, user=Depends(get_current_user)):
+    _validate_month(payload.month)
+    r = await db.investments.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"name": payload.name.strip(), "amount": payload.amount, "type": payload.type.strip()}}
+    )
+    if r.matched_count == 0: raise HTTPException(404, "Non trovato")
+    return {"ok": True}
 
 @api_router.delete("/investments/{iid}")
 async def del_inv(iid: str, user=Depends(get_current_user)):
