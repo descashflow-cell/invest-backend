@@ -231,6 +231,12 @@ async def copy_fixed(month: str, user=Depends(get_current_user)):
     await db.fixed_expenses.insert_many(new_expenses)
     return {"ok": True}
 
+@api_router.delete("/fixed-expenses/all/{month}")
+async def del_all_fixed(month: str, user=Depends(get_current_user)):
+    r = await db.fixed_expenses.delete_many({"month": month, "user_id": user["id"]})
+    if r.deleted_count == 0: raise HTTPException(404, "Not found")
+    return {"ok": True}
+
 @api_router.get("/extra-expenses", response_model=List[ExtraExpense])
 async def list_extra(month: str, user=Depends(get_current_user)):
     _validate_month(month)
