@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os, re, uuid, logging
@@ -58,6 +58,21 @@ async def get_current_user(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+def get_previous_month(month: str) -> str:
+    date = datetime.strptime(month, "%Y-%m")
+
+    if date.month == 1:
+        previous = date.replace(
+            year=date.year - 1,
+            month=12,
+        )
+    else:
+        previous = date.replace(
+            month=date.month - 1,
+        )
+
+    return previous.strftime("%Y-%m")
 
 # ----- Models -----
 class RegisterIn(BaseModel):
@@ -179,6 +194,49 @@ async def del_fixed(iid: str, user=Depends(get_current_user)):
     if r.deleted_count == 0: raise HTTPException(404, "Not found")
     return {"ok": True}
 
+@api_router.put("/fixed-expenses/{iid}")
+async def put_fixed(iid: str, payload: FixedExpenseIn, user=Depends(get_current_user)):
+    await db.fixed_expenses.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"amount": payload.amount, "name": payload.name}})
+    return {"ok": True}
+
+@api_router.post("/fixed-expenses/copy/{month}")
+async def copy_fixed(month: str, user=Depends(get_current_user)):
+    _validate_month(month)
+    previous_month = get_previous_month(month)
+    existing = await db.fixed_expenses.count_documents({
+        "user_id": user["id"],
+        "month": month,
+    })
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="FIXED_EXPENSES_ALREADY_EXIST",
+        )
+    previous_expenses = await db.fixed_expenses.find({"month": previous_month, "user_id": user["id"]}, {"_id": 0}).to_list(length=None)
+    if not previous_expenses:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="NO_FIXED_EXPENSES_TO_COPY",
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    new_expenses = []
+    for expense in previous_expenses:
+        expense["id"] = str(uuid.uuid4())
+        expense["created_at"] = now
+        expense["month"] = month
+        new_expenses.append(expense)
+
+    await db.fixed_expenses.insert_many(new_expenses)
+    return {"ok": True}
+
+@api_router.delete("/fixed-expenses/all/{month}")
+async def del_all_fixed(month: str, user=Depends(get_current_user)):
+    r = await db.fixed_expenses.delete_many({"month": month, "user_id": user["id"]})
+    if r.deleted_count == 0: raise HTTPException(404, "Not found")
+    return {"ok": True}
+
 @api_router.get("/extra-expenses", response_model=List[ExtraExpense])
 async def list_extra(month: str, user=Depends(get_current_user)):
     _validate_month(month)
@@ -194,6 +252,13 @@ async def add_extra(payload: ExtraExpenseIn, user=Depends(get_current_user)):
     await db.extra_expenses.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
     return item
+
+@api_router.put("/extra-expenses/{iid}")
+async def put_extra(iid: str, payload: ExtraExpenseIn, user=Depends(get_current_user)):
+    await db.extra_expenses.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"amount": payload.amount, "name": payload.name, "category": payload.category.strip()}})
+    return {"ok": True}
 
 @api_router.delete("/extra-expenses/{iid}")
 async def del_extra(iid: str, user=Depends(get_current_user)):
@@ -216,6 +281,16 @@ async def add_inv(payload: InvestmentIn, user=Depends(get_current_user)):
     await db.investments.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
     return item
+
+@api_router.put("/investments/{iid}")
+async def update_inv(iid: str, payload: InvestmentIn, user=Depends(get_current_user)):
+    _validate_month(payload.month)
+    r = await db.investments.update_one(
+        {"id": iid, "user_id": user["id"]},
+        {"$set": {"name": payload.name.strip(), "amount": payload.amount, "type": payload.type.strip()}}
+    )
+    if r.matched_count == 0: raise HTTPException(404, "Non trovato")
+    return {"ok": True}
 
 @api_router.delete("/investments/{iid}")
 async def del_inv(iid: str, user=Depends(get_current_user)):
@@ -271,6 +346,14 @@ async def summary(month: str, user=Depends(get_current_user)):
             "balance": balance, "fixed_expenses": fixed, "extra_expenses": extra, "by_category": by_category,
             "investments_month": inv, "investments_month_total": inv_total,
             "suggested_investable": max(0.0, balance * 0.5)}
+
+@api_router.get("/available-categories")
+async def available_categories(user=Depends(get_current_user)):
+    uid = user["id"]
+    extra_categories = await db.extra_expenses.distinct("category", {"user_id": uid})
+    fixed_names = await db.fixed_expenses.distinct("name", {"user_id": uid})
+    investments_names = await db.investments.distinct("name", {"user_id": uid})
+    return {"extra_categories": extra_categories, "fixed_names": fixed_names, "investments_names": investments_names}
 
 @api_router.get("/ytd/{year}")
 async def ytd(year: int, user=Depends(get_current_user)):
