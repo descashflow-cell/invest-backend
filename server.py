@@ -100,10 +100,10 @@ class IncomesOut(BaseModel):
     month: str; amount: float; type: str
 
 class FixedExpenseIn(BaseModel):
-    name: str = Field(min_length=1, max_length=120); amount: float = Field(ge=0)
+    name: str = Field(min_length=1, max_length=120); category: str = Field(min_length=1, max_length=60); amount: float = Field(ge=0)
 
 class FixedExpense(BaseModel):
-    id: str; name: str; amount: float; created_at: str
+    id: str; name: str; category: str; amount: float; created_at: str
 
 class ExtraExpenseIn(BaseModel):
     name: str = Field(min_length=1, max_length=120); amount: float = Field(ge=0)
@@ -182,7 +182,7 @@ async def list_fixed(month: str, user=Depends(get_current_user)):
 @api_router.post("/fixed-expenses/{month}", response_model=FixedExpense)
 async def add_fixed(month: str, payload: FixedExpenseIn, user=Depends(get_current_user)):
     _validate_month(month)
-    item = {"id": str(uuid.uuid4()), "name": payload.name.strip(), "amount": payload.amount,
+    item = {"id": str(uuid.uuid4()), "name": payload.name.strip(), "category": payload.category.strip(), "amount": payload.amount,
             "created_at": datetime.now(timezone.utc).isoformat(), "user_id": user["id"], "month": month}
     await db.fixed_expenses.insert_one(item)
     item.pop("user_id"); item.pop("_id", None)
@@ -198,7 +198,7 @@ async def del_fixed(iid: str, user=Depends(get_current_user)):
 async def put_fixed(iid: str, payload: FixedExpenseIn, user=Depends(get_current_user)):
     await db.fixed_expenses.update_one(
         {"id": iid, "user_id": user["id"]},
-        {"$set": {"amount": payload.amount, "name": payload.name}})
+        {"$set": {"amount": payload.amount, "name": payload.name, "category": payload.category}})
     return {"ok": True}
 
 @api_router.post("/fixed-expenses/copy/{month}")
@@ -334,6 +334,9 @@ async def summary(month: str, user=Depends(get_current_user)):
     salary = sum(float(sd["amount"]) for sd in incomes)
     fixed = await db.fixed_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", 1).to_list(1000)
     fixed_total = sum(x["amount"] for x in fixed)
+    fixed_cat = {}
+    for e in fixed: fixed_cat[e["category"]] = fixed_cat.get(e["category"], 0.0) + e["amount"]
+    fixed_by_category = [{"category": k, "total": v} for k, v in sorted(fixed_cat.items(), key=lambda kv: -kv[1])]
     extra = await db.extra_expenses.find({"month": month, "user_id": uid}, {"_id": 0, "user_id": 0}).sort("created_at", -1).to_list(1000)
     extra_total = sum(x["amount"] for x in extra)
     cat = {}
@@ -344,16 +347,16 @@ async def summary(month: str, user=Depends(get_current_user)):
     balance = salary - fixed_total - extra_total - inv_total
     return {"month": month, "incomes": incomes, "fixed_total": fixed_total, "extra_total": extra_total,
             "balance": balance, "fixed_expenses": fixed, "extra_expenses": extra, "by_category": by_category,
-            "investments_month": inv, "investments_month_total": inv_total,
+            "fixed_by_category": fixed_by_category, "investments_month": inv, "investments_month_total": inv_total,
             "suggested_investable": max(0.0, balance * 0.5)}
 
 @api_router.get("/available-categories")
 async def available_categories(user=Depends(get_current_user)):
     uid = user["id"]
     extra_categories = await db.extra_expenses.distinct("category", {"user_id": uid})
-    fixed_names = await db.fixed_expenses.distinct("name", {"user_id": uid})
+    fixed_categories = await db.fixed_expenses.distinct("category", {"user_id": uid})
     investments_names = await db.investments.distinct("name", {"user_id": uid})
-    return {"extra_categories": extra_categories, "fixed_names": fixed_names, "investments_names": investments_names}
+    return {"extra_categories": extra_categories, "fixed_categories": fixed_categories, "investments_names": investments_names}
 
 @api_router.get("/ytd/{year}")
 async def ytd(year: int, user=Depends(get_current_user)):
