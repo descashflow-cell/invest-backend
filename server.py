@@ -118,6 +118,9 @@ class InvestmentIn(BaseModel):
 class Investment(BaseModel):
     id: str; name: str; amount: float; month: str; type: str; created_at: str
 
+class ETF(BaseModel):
+    name: str; isin: str; ticker: str
+
 # ----- Auth routes -----
 @api_router.post("/auth/register", response_model=AuthOut)
 async def register(payload: RegisterIn):
@@ -387,6 +390,11 @@ async def ytd(year: int, user=Depends(get_current_user)):
             if worst is None or saved < worst["saved"]: worst = {"month": m, "saved": saved}
     return {"year": year, "series": series, "best_month": best, "worst_month": worst,
             "totals": {"income": ti, "fixed": tf, "extra": te, "expenses": tf+te, "invested": tin, "saved": ts, "active_months": am, "avg_saved": (ts/am) if am else 0.0}}
+
+@api_router.get("/etf-list", response_model=List[ETF])
+async def etf_list():
+    etfs = await db.etf_list.find({}, {"_id": 0}).to_list(4000)
+    return etfs
 
 app.include_router(api_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
