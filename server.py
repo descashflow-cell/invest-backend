@@ -3,15 +3,17 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status, UploadFile, File
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, re, uuid, logging
+import os, re, uuid, logging, io
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
+import pandas as pd
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -74,6 +76,38 @@ def get_previous_month(month: str) -> str:
 
     return previous.strftime("%Y-%m")
 
+def transform_csv(csv_bytes: bytes) -> bytes:
+    # Legge il CSV originale
+    df = pd.read_csv(io.BytesIO(csv_bytes))
+
+    # Filtra le righe desiderate
+    df = df[
+        (df["category"] == "TRADING") &
+        (df["type"] == "BUY") &
+        (df["asset_class"] == "FUND")
+    ]
+
+    # Crea il nuovo dataframe
+    output = pd.DataFrame({
+        "Event": "Buy",
+        "Date": df["date"],
+        "Symbol": df["symbol"],
+        "Price": df["price"],
+        "Quantity": df["shares"],
+        "Currency": df["currency"],
+        "FeeTax": df["fee"],
+        "Exchange": "",
+        "FeeCurrency": df["currency"],
+        "DoNotAdjustCash": "",
+        "Note": df["description"]
+    })
+
+    # Esporta in memoria
+    buffer = io.StringIO()
+    output.to_csv(buffer, index=False)
+
+    return buffer.getvalue().encode("utf-8-sig")
+
 # ----- Models -----
 class RegisterIn(BaseModel):
     email: EmailStr
@@ -94,7 +128,7 @@ class AuthOut(BaseModel):
     user: UserOut
 
 class IncomesIn(BaseModel):
-    amount: float = Field(ge=0); type: str = Field(min_length=1, max_length=20)
+    amount: float = Field(ge=0); type: str = Field(min_length=1, max_length=120)
 
 class IncomesOut(BaseModel):
     month: str; amount: float; type: str
@@ -117,6 +151,9 @@ class InvestmentIn(BaseModel):
 
 class Investment(BaseModel):
     id: str; name: str; amount: float; month: str; type: str; created_at: str
+
+class ETF(BaseModel):
+    name: str; isin: str; ticker: str
 
 # ----- Auth routes -----
 @api_router.post("/auth/register", response_model=AuthOut)
@@ -363,7 +400,7 @@ async def ytd(year: int, user=Depends(get_current_user)):
     if year < 2000 or year > 2100: raise HTTPException(400, "Anno non valido")
     uid = user["id"]
     months = [f"{year}-{m:02d}" for m in range(1, 13)]
-    salaries = {d["month"]: float(d["amount"]) async for d in db.salaries.find({"month": {"$in": months}, "user_id": uid}, {"_id": 0})}
+    salaries = {d["_id"]: float(d["incomes"]) async for d in db.incomes.aggregate([{"$match":{"month":{"$in": months},"user_id": uid}},{"$group":{"_id":"$month","incomes":{"$sum":"$amount"}}}])}
     # fixed_docs = await db.fixed_expenses.find({"user_id": uid}, {"_id": 0}).to_list(1000)
     fixed_docs = {f["_id"]: f["total_amount"] async for f in db.fixed_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total_amount": {"$sum": "$amount"}}}])}
     print(f"fixed_docs: {fixed_docs}")
@@ -387,6 +424,25 @@ async def ytd(year: int, user=Depends(get_current_user)):
             if worst is None or saved < worst["saved"]: worst = {"month": m, "saved": saved}
     return {"year": year, "series": series, "best_month": best, "worst_month": worst,
             "totals": {"income": ti, "fixed": tf, "extra": te, "expenses": tf+te, "invested": tin, "saved": ts, "active_months": am, "avg_saved": (ts/am) if am else 0.0}}
+
+@api_router.get("/etf-list", response_model=List[ETF])
+async def etf_list():
+    etfs = await db.etf_list.find({}, {"_id": 0}).to_list(4000)
+    return etfs
+
+@api_router.post("/transform")
+async def transform(file: UploadFile = File(...)):
+    csv_bytes = await file.read()
+
+    transformed = transform_csv(csv_bytes)
+
+    return StreamingResponse(
+        io.BytesIO(transformed),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=snowball.csv"
+        }
+    )
 
 app.include_router(api_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
