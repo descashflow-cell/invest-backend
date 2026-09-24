@@ -433,16 +433,18 @@ async def etf_list():
 @api_router.post("/transform")
 async def transform(file: UploadFile = File(...)):
     csv_bytes = await file.read()
+    try:
+        transformed = transform_csv(csv_bytes)
 
-    transformed = transform_csv(csv_bytes)
-
-    return StreamingResponse(
-        io.BytesIO(transformed),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=snowball.csv"
-        }
-    )
+        return StreamingResponse(
+            io.BytesIO(transformed),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=snowball.csv"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 app.include_router(api_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
