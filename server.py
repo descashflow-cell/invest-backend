@@ -108,6 +108,53 @@ def transform_csv(csv_bytes: bytes) -> bytes:
 
     return buffer.getvalue().encode("utf-8-sig")
 
+async def get_yearly_ytd(uid: str, year: int) -> dict:
+    months = [f"{year}-{m:02d}" for m in range(1, 13)]
+    salaries = {d["_id"]: float(d["incomes"]) async for d in db.incomes.aggregate([{"$match":{"month":{"$in": months},"user_id": uid}},{"$group":{"_id":"$month","incomes":{"$sum":"$amount"}}}])}
+    fixed_docs = {f["_id"]: f["total_amount"] async for f in db.fixed_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total_amount": {"$sum": "$amount"}}}])}
+    extra_map = {f["_id"]: f["total"] async for f in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}])}
+    # async for d in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
+    #     extra_map[d["_id"]] = float(d["total"])
+    inv_map = {d["_id"]: d["total"] async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}])}
+    # async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
+    #     inv_map[d["_id"]] = float(d["total"])
+    series = []; ti=tf=te=tin=ts=tb=0.0; am=0; best=None; worst=None
+    for m in months:
+        s = salaries.get(m, 0.0); e = extra_map.get(m, 0.0); i_ = inv_map.get(m, 0.0)
+        f = fixed_docs.get(m, 0.0)
+        bal = s - f - e; saved = bal - i_; act = s>0 or e>0 or i_>0
+        if act: am += 1
+        series.append({"month": m, "income": s, "fixed": f, "extra": e, "expenses": f+e, "invested": i_, "balance": bal, "saved": saved, "active": act})
+        ti+=s; tf+=f; te+=e; tin+=i_; ts+=saved; tb+=bal
+        if act:
+            if best is None or saved > best["saved"]: best = {"month": m, "saved": saved, "balance": bal}
+            if worst is None or saved < worst["saved"]: worst = {"month": m, "saved": saved, "balance": bal}
+    return {"year": year, "series": series, "best_month": best, "worst_month": worst,
+            "totals": {"income": ti, "fixed": tf, "extra": te, "expenses": tf+te, "invested": tin, "saved": ts, "balance": tb, "active_months": am, "avg_saved": (ts/am) if am else 0.0}}
+
+async def get_alltime_ytd(uid: str, year: int) -> dict:
+    salaries = {d["_id"]: float(d["incomes"]) async for d in db.incomes.aggregate([{"$match":{"user_id": uid}},{"$group":{"_id":{"$substr":["$month", 0, 4]},"incomes":{"$sum":"$amount"}}}])}
+    fixed_docs = {f["_id"]: f["total_amount"] async for f in db.fixed_expenses.aggregate([{"$match": {"user_id": uid}}, {"$group": {"_id":{"$substr":["$month", 0, 4]}, "total_amount": {"$sum": "$amount"}}}])}
+    extra_map = {f["_id"]: f["total"] async for f in db.extra_expenses.aggregate([{"$match": {"user_id": uid}}, {"$group": {"_id":{"$substr":["$month", 0, 4]}, "total": {"$sum": "$amount"}}}])}
+    # async for d in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
+    #     extra_map[d["_id"]] = float(d["total"])
+    inv_map = {d["_id"]: d["total"] async for d in db.investments.aggregate([{"$match": {"user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id":{"$substr":["$month", 0, 4]}, "total": {"$sum": "$amount"}}}])}
+    # async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
+    #     inv_map[d["_id"]] = float(d["total"])
+    series = []; ti=tf=te=tin=ts=tb=0.0; am=0; best=None; worst=None
+    for m in range(2000, year+1):
+        s = salaries.get(str(m), 0.0); e = extra_map.get(str(m), 0.0); i_ = inv_map.get(str(m), 0.0)
+        f = fixed_docs.get(str(m), 0.0)
+        bal = s - f - e; saved = bal - i_; act = s>0 or e>0 or i_>0
+        if act: 
+            am += 1
+            series.append({"month": str(m), "income": s, "fixed": f, "extra": e, "expenses": f+e, "invested": i_, "balance": bal, "saved": saved, "active": act})
+            ti+=s; tf+=f; te+=e; tin+=i_; ts+=saved; tb+=bal
+            if best is None or saved > best["saved"]: best = {"month": str(m), "saved": saved, "balance": bal}
+            if worst is None or saved < worst["saved"]: worst = {"month": str(m), "saved": saved, "balance": bal}
+    return {"series": series, "best_month": best, "worst_month": worst,
+            "totals": {"income": ti, "fixed": tf, "extra": te, "expenses": tf+te, "invested": tin, "saved": ts, "balance": tb, "active_months": am, "avg_saved": (ts/am) if am else 0.0}}
+
 # ----- Models -----
 class RegisterIn(BaseModel):
     email: EmailStr
@@ -395,35 +442,15 @@ async def available_categories(user=Depends(get_current_user)):
     investments_names = await db.investments.distinct("name", {"user_id": uid})
     return {"extra_categories": extra_categories, "fixed_categories": fixed_categories, "investments_names": investments_names}
 
-@api_router.get("/ytd/{year}")
-async def ytd(year: int, user=Depends(get_current_user)):
-    if year < 2000 or year > 2100: raise HTTPException(400, "Anno non valido")
+@api_router.get("/ytd/{type}/{year}")
+async def ytd(type: str, year: int, user=Depends(get_current_user)):
     uid = user["id"]
-    months = [f"{year}-{m:02d}" for m in range(1, 13)]
-    salaries = {d["_id"]: float(d["incomes"]) async for d in db.incomes.aggregate([{"$match":{"month":{"$in": months},"user_id": uid}},{"$group":{"_id":"$month","incomes":{"$sum":"$amount"}}}])}
-    # fixed_docs = await db.fixed_expenses.find({"user_id": uid}, {"_id": 0}).to_list(1000)
-    fixed_docs = {f["_id"]: f["total_amount"] async for f in db.fixed_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total_amount": {"$sum": "$amount"}}}])}
-    print(f"fixed_docs: {fixed_docs}")
-    #fixed_total = sum(float(d["amount"]) for d in fixed_docs)
-    extra_map = {}
-    async for d in db.extra_expenses.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
-        extra_map[d["_id"]] = float(d["total"])
-    inv_map = {}
-    async for d in db.investments.aggregate([{"$match": {"month": {"$in": months}, "user_id": uid, "type": {"$nin": ["initial", "extra"]}}}, {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}]):
-        inv_map[d["_id"]] = float(d["total"])
-    series = []; ti=tf=te=tin=ts=tb=0.0; am=0; best=None; worst=None
-    for m in months:
-        s = salaries.get(m, 0.0); e = extra_map.get(m, 0.0); i_ = inv_map.get(m, 0.0)
-        f = fixed_docs.get(m, 0.0) if s > 0 else 0.0
-        bal = s - f - e; saved = bal - i_; act = s>0 or e>0 or i_>0
-        if act: am += 1
-        series.append({"month": m, "income": s, "fixed": f, "extra": e, "expenses": f+e, "invested": i_, "balance": bal, "saved": saved, "active": act})
-        ti+=s; tf+=f; te+=e; tin+=i_; ts+=saved; tb+=bal
-        if act:
-            if best is None or saved > best["saved"]: best = {"month": m, "saved": saved, "balance": bal}
-            if worst is None or saved < worst["saved"]: worst = {"month": m, "saved": saved, "balance": bal}
-    return {"year": year, "series": series, "best_month": best, "worst_month": worst,
-            "totals": {"income": ti, "fixed": tf, "extra": te, "expenses": tf+te, "invested": tin, "saved": ts, "balance": tb, "active_months": am, "avg_saved": (ts/am) if am else 0.0}}
+    if year < 2000 or year > 2100: raise HTTPException(400, "Anno non valido")
+    if type not in ["yearly", "alltime"]: raise HTTPException(400, "Tipo non valido")
+    if type == "alltime":
+        return await get_alltime_ytd(uid, year)
+    if type == "yearly":
+        return await get_yearly_ytd(uid, year)
 
 @api_router.get("/etf-list", response_model=List[ETF])
 async def etf_list():
